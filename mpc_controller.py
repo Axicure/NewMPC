@@ -20,14 +20,14 @@ class MPCController:
             'beta': 0.3,   # 功耗权重
             'gamma': 0.2,  # 迁移成本权重
             'delta': 0.1,  # 资源争用权重
-            'nu': 10.0,    # 迁移成本基础参数
+            'nu': 1000.0,    # 迁移成本基础参数
             'mu': 0.1,     # 迁移成本内存系数
             'w_cpu': 0.4,  # CPU争用权重
-            'w_mem': 0.3,  # 内存争用权重
-            'w_io': 0.2,   # IO争用权重
-            'w_net': 0.1,  # 网络争用权重
-            'single_server_load': 1.0,  # 单台服务器功耗参数
-            'max_servers': 39,  # 最大服务器数量，修改为物理机实际数量
+            'w_mem': 0.6,  # 内存争用权重
+            'w_io': 0,   # IO争用权重
+            'w_net': 0,  # 网络争用权重
+            'single_server_load': 10000.0,  # 单台服务器功耗参数
+            'max_servers': 20,  # 最大服务器数量，修改为物理机实际数量
             'max_resource_competition': 100.0,  # 最大资源争用值，提高限制
             'risk_threshold': 0.5,  # 风险评级阈值，超过该值判定为攻击者
             'risk_window_threshold': 100.0,  # 风险共居时间矩阵阈值

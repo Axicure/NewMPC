@@ -21,7 +21,7 @@ class DataLoader:
         self.vm_instances = {}  # 虚拟机实例数据 {vm_id: pd.DataFrame}
         self.time_windows = {}  # 按时间窗口聚合的数据 {vm_id: {time_window_id: {cpu, memory, risk}}}
 
-    def load_vm_pm_mapping(self, file_path: str = "data/container_machine_id.csv") -> Dict[int, int]:
+    def load_vm_pm_mapping(self, file_path: str = "data/container_machine_id_20.csv") -> Dict[int, int]:
         """
         加载虚拟机和物理机的映射关系
         :param file_path: 文件路径
@@ -37,7 +37,7 @@ class DataLoader:
         self.vm_pm_mapping = dict(zip(mapping_data['vm_id'], mapping_data['pm_id']))
         return self.vm_pm_mapping
 
-    def load_pm_ids(self, file_path: str = "data/mac_keys/50.csv") -> List[int]:
+    def load_pm_ids(self, file_path: str = "data/mac_keys/20.csv") -> List[int]:
         """
         加载物理机ID列表
         :param file_path: 文件路径
@@ -58,7 +58,10 @@ class DataLoader:
         self.vm_instances = {}
 
         for vm_id in range(1, self.vm_count + 1):
-            file_path = os.path.join(data_dir, f"instance_{vm_id}.csv")
+            if vm_id < 100:
+                file_path = os.path.join(data_dir, f"instance_{vm_id}.csv")
+            else:
+                file_path = os.path.join(data_dir, f"instance_{vm_id % 50 + 50}.csv")
             if os.path.exists(file_path):
                 # 读取数据文件 - 没有表头的CSV文件
                 df = pd.read_csv(file_path, header=None)

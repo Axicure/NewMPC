@@ -637,8 +637,8 @@ class MPCScheduler:
 def main():
     """主函数"""
     # 设置虚拟机和物理机数量
-    VM_COUNT = 50
-    PM_COUNT = 39
+    VM_COUNT = 100
+    PM_COUNT = 20
 
     # 创建并运行MPC调度器
     scheduler = MPCScheduler(vm_count=VM_COUNT, pm_count=PM_COUNT)
