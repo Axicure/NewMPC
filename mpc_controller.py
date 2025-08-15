@@ -3,6 +3,7 @@ import random
 from typing import Dict, List, Tuple, Set
 import gc
 
+
 class MPCController:
     def __init__(self, data_loader, prediction_models, params=None):
         """
@@ -13,38 +14,40 @@ class MPCController:
         """
         self.data_loader = data_loader
         self.prediction_models = prediction_models
-        
+
         # 设置MPC参数
         default_params = {
             'alpha': 0.4,  # 共居风险权重
-            'beta': 0.3,   # 功耗权重
+            'beta': 0.3,  # 功耗权重
             'gamma': 0.2,  # 迁移成本权重
             'delta': 0.1,  # 资源争用权重
-            'nu': 1000.0,    # 迁移成本基础参数
-            'mu': 0.1,     # 迁移成本内存系数
+            'nu': 1000.0,  # 迁移成本基础参数
+            'mu': 1,  # 迁移成本内存系数
             'w_cpu': 0.4,  # CPU争用权重
             'w_mem': 0.6,  # 内存争用权重
-            'w_io': 0,   # IO争用权重
-            'w_net': 0,  # 网络争用权重
             'single_server_load': 10000.0,  # 单台服务器功耗参数
             'max_servers': 20,  # 最大服务器数量，修改为物理机实际数量
-            'max_resource_competition': 100.0,  # 最大资源争用值，提高限制
+            'max_resource_competition': 50000.0,  # 最大资源争用值，提高限制
             'risk_threshold': 0.5,  # 风险评级阈值，超过该值判定为攻击者
             'risk_window_threshold': 100.0,  # 风险共居时间矩阵阈值
+            'attacker_clear_window': 300,  # 攻击者标记清除时间窗数量
         }
-        
+
         self.params = default_params
         if params:
             self.params.update(params)
-        
+
         # 初始化虚拟机状态
         self.vm_is_attacker = {}  # 记录虚拟机是否为攻击者 {vm_id: is_attacker}
+        self.vm_last_attack_window = {}  # 记录虚拟机最后一次被检测为攻击的时间窗口 {vm_id: window_id}
+
         for vm_id in self.data_loader.vm_instances.keys():
             self.vm_is_attacker[vm_id] = False
-        
+            self.vm_last_attack_window[vm_id] = -1  # -1 表示从未被检测为攻击者
+
         # 初始化风险共居时间矩阵 T
         self.T = np.zeros((self.data_loader.vm_count + 1, self.data_loader.vm_count + 1))
-        
+
         # 存储最近一次计算的成本组成部分
         self.last_cost_components = {
             'cluster_risk': 0.0,
@@ -53,27 +56,67 @@ class MPCController:
             'resource_contention': 0.0,
             'total_cost': 0.0
         }
-        
+
         # 记录实际执行的迁移
         self.migrations_executed = []
-    
+
     def update_attacker_status(self, current_window: int):
         """
-        更新攻击者状态
+        更新攻击者状态：
+        - 检查所有检测到攻击行为的虚拟机，是否满足共居条件，满足则标记为攻击者。
+        - 如果攻击者连续若干时间窗口未满足“攻击 + 共居”，则取消其攻击者标记。
         :param current_window: 当前时间窗口
         """
         window_data = self.data_loader.get_time_window_data(current_window)
-        
+        vms_with_attack = []
+
+        # 第一步：找出所有在当前窗口检测到攻击行为的虚拟机
         for vm_id, data in window_data.items():
-            # 如果之前已经标记为攻击者，则保持攻击者状态
-            if self.vm_is_attacker.get(vm_id, False):
-                continue
-            
-            # 如果风险评级超过阈值，标记为攻击者
             if data['risk_level'] > self.params['risk_threshold']:
-                self.vm_is_attacker[vm_id] = True
-                print(f"虚拟机 {vm_id} 在时间窗口 {current_window} 被标记为攻击者，风险评级: {data['risk_level']}")
-    
+                vms_with_attack.append(vm_id)
+
+        # 第二步：处理攻击行为虚拟机
+        for vm_id in vms_with_attack:
+            attacker_pm = self.data_loader.vm_pm_mapping.get(vm_id)
+            if attacker_pm is None:
+                continue
+
+            cohabiting_vms = [other_vm for other_vm, pm_id in self.data_loader.vm_pm_mapping.items()
+                              if pm_id == attacker_pm and other_vm != vm_id]
+            has_normal_users = any(not self.vm_is_attacker.get(other_vm, False) for other_vm in cohabiting_vms)
+
+            if has_normal_users and cohabiting_vms:
+                # 满足攻击 + 共居条件
+                if not self.vm_is_attacker.get(vm_id, False):
+                    self.vm_is_attacker[vm_id] = True
+                    print(f"虚拟机 {vm_id} 在时间窗口 {current_window} 被标记为攻击者")
+                    print(f"  - 风险评级: {window_data[vm_id]['risk_level']}")
+                    print(f"  - 所在物理机: {attacker_pm}")
+                    print(
+                        f"  - 共居的正常用户: {[vm for vm in cohabiting_vms if not self.vm_is_attacker.get(vm, False)]}")
+
+                # 更新最近一次满足“攻击+共居”条件的时间窗口
+                self.vm_last_attack_window[vm_id] = current_window
+            else:
+                if not self.vm_is_attacker.get(vm_id, False):
+                    print(f"虚拟机 {vm_id} 在时间窗口 {current_window} 检测到攻击行为但不满足共居条件")
+                    print(f"  - 风险评级: {window_data[vm_id]['risk_level']}")
+                    print(f"  - 共居虚拟机数量: {len(cohabiting_vms)}")
+                    print(
+                        f"  - 共居正常用户数量: {len([vm for vm in cohabiting_vms if not self.vm_is_attacker.get(vm, False)])}")
+
+        # 第三步：取消攻击者标记的逻辑更新
+        for vm_id in list(self.vm_is_attacker.keys()):
+            if self.vm_is_attacker.get(vm_id, False):
+                last_attack_cohab_window = self.vm_last_attack_window.get(vm_id, -1)
+                if last_attack_cohab_window == -1:
+                    continue
+                windows_since_valid = current_window - last_attack_cohab_window
+                if windows_since_valid >= self.params['attacker_clear_window']:
+                    self.vm_is_attacker[vm_id] = False
+                    print(f"虚拟机 {vm_id} 在时间窗口 {current_window} 取消攻击者标记")
+                    print(f"  - 已连续 {windows_since_valid} 个时间窗口未满足攻击+共居条件")
+
     def get_vm_status(self, vm_id: int, window_id: int = None) -> Dict:
         """
         获取虚拟机状态
@@ -83,22 +126,26 @@ class MPCController:
         """
         # 获取虚拟机是否为攻击者
         is_attacker = self.vm_is_attacker.get(vm_id, False)
-        
+
         # 获取虚拟机当前所在物理机
         current_pm = self.data_loader.vm_pm_mapping.get(vm_id)
-        
+
+        # 获取最后一次攻击检测时间窗口
+        last_attack_window = self.vm_last_attack_window.get(vm_id, -1)
+
         # 如果指定了时间窗口，获取该时间窗口的资源使用情况
         resource_usage = None
         if window_id is not None and vm_id in self.data_loader.time_windows:
             if window_id in self.data_loader.time_windows[vm_id]:
                 resource_usage = self.data_loader.time_windows[vm_id][window_id]
-        
+
         return {
             'is_attacker': is_attacker,
             'current_pm': current_pm,
-            'resource_usage': resource_usage
+            'resource_usage': resource_usage,
+            'last_attack_window': last_attack_window
         }
-    
+
     def update_risk_cohabitation_time(self, vm_pm_mapping: Dict[int, int] = None):
         """
         更新风险共居时间矩阵
@@ -230,78 +277,48 @@ class MPCController:
     
     def calculate_resource_contention(self, vm_pm_mapping: Dict[int, int], window_data: Dict[int, Dict]) -> float:
         """
-        计算资源争用程度
+        计算负载不平衡度
         :param vm_pm_mapping: 虚拟机到物理机的映射
-        :param window_data: 当前时间窗口的数据
-        :return: 资源争用程度
+        :param window_data: 当前时间窗口的各VM cpu/mem 使用
+        :return: 负载不平衡度值
         """
-        # 获取活跃的物理机
-        active_pms = self.data_loader.get_active_physical_machines(vm_pm_mapping)
-        
-        if not active_pms:
-            return 0
-        
-        # 为每个服务器创建虚拟机列表
-        pm_to_vms = {}
+        active_pms = list(self.data_loader.get_active_physical_machines(vm_pm_mapping))
+        num_active = len(active_pms)
+        if num_active == 0:
+            return 0.0
+        if num_active == 1:
+            return 0.0  # 只有一台服务器，不存在不平衡
+
+        # 聚合每台服务器的CPU与内存总使用
+        pm_cpu_sum = {pm: 0.0 for pm in active_pms}
+        pm_mem_sum = {pm: 0.0 for pm in active_pms}
+
         for vm_id, pm_id in vm_pm_mapping.items():
-            if pm_id not in pm_to_vms:
-                pm_to_vms[pm_id] = []
-            pm_to_vms[pm_id].append(vm_id)
-        
-        # 资源容量向量 (CPU, 内存, IO, 网络)
-        server_capacity = [100, 100, 100, 100]  # 假设每台服务器的资源容量相同
-        
-        # 计算每台服务器的资源争用度
-        server_contentions = {}
-        for pm_id in active_pms:
-            server_contention = 0
-            vm_list = pm_to_vms.get(pm_id, [])
-            
-            # 计算所有虚拟机对之间的资源争用
-            for i, vm_a in enumerate(vm_list):
-                for vm_b in vm_list[i+1:]:
-                    if vm_a == vm_b:
-                        continue
-                    
-                    # 获取虚拟机资源使用情况
-                    vm_a_data = window_data.get(vm_a, {})
-                    vm_b_data = window_data.get(vm_b, {})
-                    
-                    # 资源向量 (CPU, 内存, IO, 网络)
-                    # 这里我们只有CPU和内存数据，IO和网络设为固定值
-                    resource_a = [
-                        vm_a_data.get('cpu_usage', 0),
-                        vm_a_data.get('memory_usage', 0),
-                        10,  # 假设IO使用率
-                        10   # 假设网络使用率
-                    ]
-                    
-                    resource_b = [
-                        vm_b_data.get('cpu_usage', 0),
-                        vm_b_data.get('memory_usage', 0),
-                        10,  # 假设IO使用率
-                        10   # 假设网络使用率
-                    ]
-                    
-                    # 计算资源冲突
-                    contention = 0
-                    weights = [self.params['w_cpu'], self.params['w_mem'], self.params['w_io'], self.params['w_net']]
-                    
-                    for k in range(4):
-                        # 如果两个虚拟机的资源使用总和超过服务器容量，则存在争用
-                        contention += weights[k] * max(0, resource_a[k] + resource_b[k] - server_capacity[k])
-                    
-                    server_contention += contention
-            
-            server_contentions[pm_id] = server_contention
-        
-        # 计算平均资源争用度
-        if len(active_pms) > 1:
-            avg_contention = sum(server_contentions.values()) / (len(active_pms) - 1)
-        else:
-            avg_contention = sum(server_contentions.values())
-        
-        return avg_contention
+            if pm_id not in pm_cpu_sum:
+                # 如果该PM当前未被认为是活跃（极端情况），跳过
+                continue
+            vm_data = window_data.get(vm_id)
+            if not vm_data:
+                continue
+            pm_cpu_sum[pm_id] += float(vm_data.get('cpu_usage', 0.0))
+            pm_mem_sum[pm_id] += float(vm_data.get('memory_usage', 0.0))
+
+        # 计算全局平均
+        cpu_avg = sum(pm_cpu_sum.values()) / num_active
+        mem_avg = sum(pm_mem_sum.values()) / num_active
+
+        w_cpu = float(self.params.get('w_cpu', 1.0))
+        w_mem = float(self.params.get('w_mem', 1.0))
+
+        # 计算不平衡度
+        imbalance_sum = 0.0
+        for pm in active_pms:
+            cpu_dev = pm_cpu_sum[pm] - cpu_avg
+            mem_dev = pm_mem_sum[pm] - mem_avg
+            imbalance_sum += w_cpu * (cpu_dev * cpu_dev) + w_mem * (mem_dev * mem_dev)
+
+        load_imbalance = imbalance_sum / (num_active - 1)
+        return load_imbalance
     
     def calculate_cost(self, vm_pm_mapping: Dict[int, int], current_mapping: Dict[int, int], window_data: Dict[int, Dict]) -> float:
         """
@@ -373,17 +390,22 @@ class MPCController:
                 all_pms = self.data_loader.pm_ids
                 
                 for vm_id in vms_to_migrate:
-                    # 如果有多台活跃的物理机，随机选择一台不同的物理机
-                    if len(active_pms) > 1:
-                        current_pm = vm_pm_mapping[vm_id]
-                        possible_pms = [pm for pm in active_pms if pm != current_pm]
-                        if possible_pms:
-                            new_pm = random.choice(possible_pms)
-                            new_mapping[vm_id] = new_pm
-                    # 否则随机选择一台物理机（可能是新的物理机）
-                    else:
-                        new_pm = random.choice(all_pms)
+                    current_pm = vm_pm_mapping[vm_id]
+                    possible_pms = [pm for pm in all_pms if pm != current_pm]
+                    if possible_pms:
+                        new_pm = random.choice(possible_pms)
                         new_mapping[vm_id] = new_pm
+                    # # 如果有多台活跃的物理机，随机选择一台不同的物理机
+                    # if len(active_pms) > 1:
+                    #     current_pm = vm_pm_mapping[vm_id]
+                    #     possible_pms = [pm for pm in active_pms if pm != current_pm]
+                    #     if possible_pms:
+                    #         new_pm = random.choice(possible_pms)
+                    #         new_mapping[vm_id] = new_pm
+                    # # 否则随机选择一台物理机（可能是新的物理机）
+                    # else:
+                    #     new_pm = random.choice(all_pms)
+                    #     new_mapping[vm_id] = new_pm
             
             elif method == 'heuristic':
                 # 启发式方法：将高风险虚拟机分散到不同物理机
@@ -410,7 +432,7 @@ class MPCController:
                     
                     if vms_to_migrate:
                         # 随机选择1-3个虚拟机进行迁移
-                        n_vms_to_migrate = min(len(vms_to_migrate), 3)
+                        n_vms_to_migrate = min(len(vms_to_migrate), 5)
                         vms_to_migrate = random.sample(vms_to_migrate, n_vms_to_migrate)
                         
                         # 获取所有可用的物理机
