@@ -19,18 +19,20 @@ class MPCController:
         default_params = {
             'alpha': 0.4,  # 共居风险权重
             'beta': 0.3,  # 功耗权重
-            'gamma': 0.2,  # 迁移成本权重
-            'delta': 0.1,  # 资源争用权重
+            'gamma': 0.1,  # 迁移成本权重
+            'delta': 0.2,  # 资源争用权重
             'nu': 1000.0,  # 迁移成本基础参数
             'mu': 1,  # 迁移成本内存系数
             'w_cpu': 0.4,  # CPU争用权重
             'w_mem': 0.6,  # 内存争用权重
-            'single_server_load': 10000.0,  # 单台服务器功耗参数
+            'single_server_load': 20000.0,  # 单台服务器功耗参数
             'max_servers': 20,  # 最大服务器数量，修改为物理机实际数量
             'max_resource_competition': 50000.0,  # 最大资源争用值，提高限制
             'risk_threshold': 0.5,  # 风险评级阈值，超过该值判定为攻击者
             'risk_window_threshold': 100.0,  # 风险共居时间矩阵阈值
             'attacker_clear_window': 300,  # 攻击者标记清除时间窗数量
+            'server_cpu_capacity': 10,  # 服务器CPU容量（相对于虚拟机100%的倍数）
+            'server_mem_capacity': 50,  # 服务器内存容量（相对于虚拟机100%的倍数）
         }
 
         self.params = default_params
@@ -278,6 +280,7 @@ class MPCController:
     def calculate_resource_contention(self, vm_pm_mapping: Dict[int, int], window_data: Dict[int, Dict]) -> float:
         """
         计算负载不平衡度
+        将虚拟机的CPU和内存使用率转换为相对于服务器容量的值，然后计算负载不平衡度
         :param vm_pm_mapping: 虚拟机到物理机的映射
         :param window_data: 当前时间窗口的各VM cpu/mem 使用
         :return: 负载不平衡度值
@@ -289,7 +292,11 @@ class MPCController:
         if num_active == 1:
             return 0.0  # 只有一台服务器，不存在不平衡
 
-        # 聚合每台服务器的CPU与内存总使用
+        # 获取服务器容量参数
+        server_cpu_capacity = float(self.params.get('server_cpu_capacity', 100.0))
+        server_mem_capacity = float(self.params.get('server_mem_capacity', 100.0))
+
+        # 聚合每台服务器的CPU与内存总使用（转换为相对于服务器容量的值）
         pm_cpu_sum = {pm: 0.0 for pm in active_pms}
         pm_mem_sum = {pm: 0.0 for pm in active_pms}
 
@@ -300,8 +307,17 @@ class MPCController:
             vm_data = window_data.get(vm_id)
             if not vm_data:
                 continue
-            pm_cpu_sum[pm_id] += float(vm_data.get('cpu_usage', 0.0))
-            pm_mem_sum[pm_id] += float(vm_data.get('memory_usage', 0.0))
+            
+            # 将虚拟机使用率转换为相对于服务器容量的值
+            vm_cpu_usage = float(vm_data.get('cpu_usage', 0.0))
+            vm_mem_usage = float(vm_data.get('memory_usage', 0.0))
+            
+            # 转换为相对于服务器容量的值
+            cpu_relative = vm_cpu_usage / server_cpu_capacity
+            mem_relative = vm_mem_usage / server_mem_capacity
+            
+            pm_cpu_sum[pm_id] += cpu_relative
+            pm_mem_sum[pm_id] += mem_relative
 
         # 计算全局平均
         cpu_avg = sum(pm_cpu_sum.values()) / num_active
@@ -317,7 +333,7 @@ class MPCController:
             mem_dev = pm_mem_sum[pm] - mem_avg
             imbalance_sum += w_cpu * (cpu_dev * cpu_dev) + w_mem * (mem_dev * mem_dev)
 
-        load_imbalance = imbalance_sum / (num_active - 1)
+        load_imbalance = 100 * imbalance_sum / (num_active - 1)
         return load_imbalance
     
     def calculate_cost(self, vm_pm_mapping: Dict[int, int], current_mapping: Dict[int, int], window_data: Dict[int, Dict]) -> float:
@@ -336,9 +352,31 @@ class MPCController:
         
         # 检查约束条件
         active_pms = self.data_loader.get_active_physical_machines(vm_pm_mapping)
-        if len(active_pms) > self.params['max_servers'] or resource_contention > self.params['max_resource_competition']:
+        if len(active_pms) > self.params['max_servers']: # or resource_contention > self.params['max_resource_competition']
             print(f"约束条件违反: 活跃物理机数量={len(active_pms)}/{self.params['max_servers']}, 资源争用={resource_contention:.2f}/{self.params['max_resource_competition']}")
             return float('inf')  # 违反约束条件，返回无穷大成本
+        
+        # 检查每台服务器的资源使用率是否超过100%
+        server_cpu_capacity = float(self.params.get('server_cpu_capacity', 100.0))
+        server_mem_capacity = float(self.params.get('server_mem_capacity', 100.0))
+        
+        for pm_id in active_pms:
+            pm_vms = [vm_id for vm_id, pm in vm_pm_mapping.items() if pm == pm_id]
+            total_cpu_usage = 0.0
+            total_mem_usage = 0.0
+            
+            for vm_id in pm_vms:
+                vm_data = window_data.get(vm_id, {})
+                total_cpu_usage += float(vm_data.get('cpu_usage', 0.0))
+                total_mem_usage += float(vm_data.get('memory_usage', 0.0))
+            
+            # 转换为相对于服务器容量的使用率
+            cpu_usage_ratio = total_cpu_usage / server_cpu_capacity
+            mem_usage_ratio = total_mem_usage / server_mem_capacity
+            
+            if cpu_usage_ratio > 100.0 or mem_usage_ratio > 100.0:
+                print(f"约束条件违反: 物理机 {pm_id} 资源超限 - CPU使用率: {cpu_usage_ratio:.2f}%, 内存使用率: {mem_usage_ratio:.2f}%")
+                return float('inf')  # 违反约束条件，返回无穷大成本
         
         # 计算加权总成本
         total_cost = (
@@ -358,8 +396,9 @@ class MPCController:
         }
         
         return total_cost
-    
-    def generate_new_mapping(self, vm_pm_mapping: Dict[int, int], window_data: Dict[int, Dict], method: str = 'random', n_attempts: int = 10) -> Dict[int, int]:
+
+    def generate_new_mapping(self, vm_pm_mapping: Dict[int, int], window_data: Dict[int, Dict], method: str = 'random',
+                             n_attempts: int = 10) -> Dict[int, int]:
         """
         生成新的虚拟机到物理机的映射
         :param vm_pm_mapping: 当前虚拟机到物理机的映射
@@ -369,101 +408,258 @@ class MPCController:
         :return: 新的虚拟机到物理机的映射
         """
         # 检查是否有风险超过阈值的情况
-        cluster_risk = self.calculate_cluster_risk(vm_pm_mapping)
-        if cluster_risk < self.params['risk_window_threshold']:
-            return vm_pm_mapping.copy()  # 如果风险较低，则不改变映射
-        
+        # cluster_risk = self.calculate_cluster_risk(vm_pm_mapping)
+        # if cluster_risk < self.params['risk_window_threshold']:
+        #     return vm_pm_mapping.copy()  # 如果风险较低，则不改变映射
+
         best_mapping = vm_pm_mapping.copy()
         best_cost = self.calculate_cost(vm_pm_mapping, vm_pm_mapping, window_data)
-        
+
         for _ in range(n_attempts):
             if method == 'random':
+                cluster_risk = self.calculate_cluster_risk(vm_pm_mapping)
+                if cluster_risk < self.params['risk_window_threshold']:
+                    return vm_pm_mapping.copy()  # 如果风险较低，则不改变映射
                 # 随机选择一些虚拟机进行迁移
                 new_mapping = vm_pm_mapping.copy()
-                
+
                 # 随机选择1-3个虚拟机进行迁移
-                n_vms_to_migrate = random.randint(1, min(3, len(vm_pm_mapping)))
+                n_vms_to_migrate = random.randint(1, min(5, len(vm_pm_mapping)))
                 vms_to_migrate = random.sample(list(vm_pm_mapping.keys()), n_vms_to_migrate)
-                
+
                 # 随机选择目标物理机
                 active_pms = list(self.data_loader.get_active_physical_machines(vm_pm_mapping))
                 all_pms = self.data_loader.pm_ids
-                
+
                 for vm_id in vms_to_migrate:
                     current_pm = vm_pm_mapping[vm_id]
                     possible_pms = [pm for pm in all_pms if pm != current_pm]
                     if possible_pms:
                         new_pm = random.choice(possible_pms)
                         new_mapping[vm_id] = new_pm
-                    # # 如果有多台活跃的物理机，随机选择一台不同的物理机
-                    # if len(active_pms) > 1:
-                    #     current_pm = vm_pm_mapping[vm_id]
-                    #     possible_pms = [pm for pm in active_pms if pm != current_pm]
-                    #     if possible_pms:
-                    #         new_pm = random.choice(possible_pms)
-                    #         new_mapping[vm_id] = new_pm
-                    # # 否则随机选择一台物理机（可能是新的物理机）
-                    # else:
-                    #     new_pm = random.choice(all_pms)
-                    #     new_mapping[vm_id] = new_pm
-            
+
             elif method == 'heuristic':
-                # 启发式方法：将高风险虚拟机分散到不同物理机
+                # 启发式方法：优先级为攻击者聚合 -> 减少物理机数量 -> 负载均衡
                 new_mapping = vm_pm_mapping.copy()
+                migration_count = 0  # 限制迁移数量
+                max_migrations = random.randint(1, min(5, len(vm_pm_mapping)))
+
+                # 第一优先级：攻击者聚合
+                # 找出所有攻击者和正常用户
+                attackers = [vm_id for vm_id in vm_pm_mapping.keys() if self.vm_is_attacker.get(vm_id, False)]
+                normal_users = [vm_id for vm_id in vm_pm_mapping.keys() if not self.vm_is_attacker.get(vm_id, False)]
+
+                cluster_risk = self.calculate_cluster_risk(vm_pm_mapping)
+                if cluster_risk > self.params['risk_window_threshold']:
+                    if attackers and migration_count < max_migrations:
+                        # 统计攻击者当前分布
+                        attacker_pm_distribution = {}
+                        for attacker_id in attackers:
+                            pm_id = vm_pm_mapping[attacker_id]
+                            if pm_id not in attacker_pm_distribution:
+                                attacker_pm_distribution[pm_id] = []
+                            attacker_pm_distribution[pm_id].append(attacker_id)
+
+                        # 按攻击者数量从多到少排序所有物理机，作为潜在目标
+                        if len(attacker_pm_distribution) > 1:
+                            sorted_pm_by_attacker_count = sorted(attacker_pm_distribution.items(),
+                                                                key=lambda x: len(x[1]), reverse=True)
+
+                            # 计算每台物理机上攻击者的共居总时长，优先迁移共居时长最长的
+                            pm_cohabitation_times = {}
+                            for pm_id, attacker_list in attacker_pm_distribution.items():
+                                # 计算该物理机上攻击者与正常用户的共居总时长
+                                total_cohabitation_time = 0.0
+                                for attacker_id in attacker_list:
+                                    # 计算该攻击者与所有正常用户的共居时间总和
+                                    for normal_id in normal_users:
+                                        if vm_pm_mapping[normal_id] == pm_id:  # 如果正常用户也在这台物理机上
+                                            total_cohabitation_time += self.T[attacker_id, normal_id]
+                                pm_cohabitation_times[pm_id] = total_cohabitation_time
+
+                            # 按共居总时长排序，优先迁移共居时长最长的物理机中的攻击者
+                            sorted_pms_by_time = sorted(pm_cohabitation_times.items(), key=lambda x: x[1], reverse=True)
+
+                            # 尝试每个目标物理机，从攻击者最集中的开始
+                            migration_success = False
+                            for target_pm_idx, (target_pm, _) in enumerate(sorted_pm_by_attacker_count):
+                                if migration_success:
+                                    break
+
+                                # 创建临时映射来测试迁移效果
+                                temp_mapping = new_mapping.copy()
+                                temp_migration_count = migration_count
+
+                                # 按优先级迁移攻击者到当前目标物理机
+                                for pm_id, cohabitation_time in sorted_pms_by_time:
+                                    if pm_id != target_pm and temp_migration_count < max_migrations:
+                                        attacker_list = attacker_pm_distribution[pm_id]
+                                        for attacker_id in attacker_list:
+                                            if temp_migration_count < max_migrations:
+                                                temp_mapping[attacker_id] = target_pm
+                                                temp_migration_count += 1
+
+                                # 检查资源争用是否超过限制
+                                # temp_resource_contention = self.calculate_resource_contention(temp_mapping, window_data)
+                                temp_resource_contention = 0.0
+
+                                # if temp_resource_contention <= self.params['max_resource_competition']:
+                                #     # 检查服务器资源使用率约束
+                                if self._check_server_resource_constraints(temp_mapping, window_data):
+                                    # 满足所有约束条件，应用迁移
+                                    new_mapping = temp_mapping
+                                    migration_count = temp_migration_count
+                                    migration_success = True
+                                    print(
+                                        f"攻击者聚合：选择第{target_pm_idx + 1}集中的物理机{target_pm}作为目标，资源争用: {temp_resource_contention:.2f}")
+                                else:
+                                    print(
+                                        f"攻击者聚合：第{target_pm_idx + 1}集中的物理机{target_pm}会导致服务器资源超限，尝试下一个目标")
+                                # else:
+                                #     print(
+                                #         f"攻击者聚合：第{target_pm_idx + 1}集中的物理机{target_pm}会导致资源争用超限({temp_resource_contention:.2f} > {self.params['max_resource_competition']})，尝试下一个目标")
+
+                            if not migration_success:
+                                print("攻击者聚合：所有目标物理机都会导致资源争用超限，跳过攻击者聚合步骤")
                 
-                # 获取每台物理机的风险值
-                pm_risks = {}
-                for pm_id in self.data_loader.get_active_physical_machines(vm_pm_mapping):
-                    pm_risks[pm_id] = self.calculate_server_risk(pm_id, vm_pm_mapping)
-                
-                # 找出风险最高的物理机
-                if pm_risks:
-                    highest_risk_pm = max(pm_risks.items(), key=lambda x: x[1])[0]
-                    
-                    # 获取这台物理机上的所有虚拟机
-                    pm_vms = [vm_id for vm_id, pm in vm_pm_mapping.items() if pm == highest_risk_pm]
-                    
-                    # 找出这台物理机上攻击者和被攻击者的虚拟机
-                    attackers = [vm_id for vm_id in pm_vms if self.vm_is_attacker.get(vm_id, False)]
-                    victims = [vm_id for vm_id in pm_vms if not self.vm_is_attacker.get(vm_id, False)]
-                    
-                    # 如果有攻击者，尝试迁移它们
-                    vms_to_migrate = attackers if attackers else (victims if victims else [])
-                    
-                    if vms_to_migrate:
-                        # 随机选择1-3个虚拟机进行迁移
-                        n_vms_to_migrate = min(len(vms_to_migrate), 5)
-                        vms_to_migrate = random.sample(vms_to_migrate, n_vms_to_migrate)
-                        
-                        # 获取所有可用的物理机
-                        all_pms = self.data_loader.pm_ids
-                        
-                        # 寻找风险最低的物理机作为目标
-                        lowest_risk_pms = sorted(pm_risks.items(), key=lambda x: x[1])
-                        target_pms = [pm for pm, _ in lowest_risk_pms if pm != highest_risk_pm]
-                        
-                        # 如果没有其他活跃的物理机，随机选择一台未使用的物理机
-                        if not target_pms:
-                            inactive_pms = [pm for pm in all_pms if pm not in pm_risks]
-                            if inactive_pms:
-                                target_pms = [random.choice(inactive_pms)]
-                        
-                        # 迁移虚拟机
-                        if target_pms:
-                            for i, vm_id in enumerate(vms_to_migrate):
-                                target_pm = target_pms[i % len(target_pms)]
-                                new_mapping[vm_id] = target_pm
-            
+                if migration_count == max_migrations:
+                    temp_new_cost = self.calculate_cost(new_mapping, vm_pm_mapping, window_data)
+                    if temp_new_cost > best_cost:
+                        new_mapping = vm_pm_mapping.copy()
+                        migration_count = 0
+
+                # 第二优先级：减少物理机数量（正常用户聚合）
+
+                if migration_count < max_migrations:
+                    active_pms = list(self.data_loader.get_active_physical_machines(new_mapping))
+
+                    # 计算每台物理机上的正常用户数量
+                    pm_normal_users = {}
+                    for normal_id in normal_users:
+                        pm_id = new_mapping[normal_id]
+                        if pm_id not in pm_normal_users:
+                            pm_normal_users[pm_id] = []
+                        pm_normal_users[pm_id].append(normal_id)
+
+                    # 如果有多台物理机且存在正常用户数量较少的物理机
+                    if len(pm_normal_users) > 1:
+                        # 按正常用户数量排序，从少到多
+                        sorted_pm_normal = sorted(pm_normal_users.items(), key=lambda x: len(x[1]))
+
+                        # 找到正常用户最多的物理机作为聚合目标
+                        target_pm = sorted_pm_normal[-1][0]
+
+                        # 将用户较少的物理机上的正常用户迁移到目标物理机
+                        for pm_id, vm_list in sorted_pm_normal[:-1]:  # 除了最后一个（用户最多的）
+                            # 检查该物理机是否也有攻击者，如果有攻击者则不迁移正常用户
+                            pm_has_attackers = any(self.vm_is_attacker.get(vm_id, False)
+                                                   for vm_id in new_mapping.keys()
+                                                   if new_mapping[vm_id] == pm_id)
+
+                            if not pm_has_attackers:
+                                for normal_id in vm_list:
+                                    if migration_count < max_migrations:
+                                        new_mapping[normal_id] = target_pm
+                                        migration_count += 1
+
+                if migration_count == max_migrations:
+                    temp_new_cost = self.calculate_cost(new_mapping, vm_pm_mapping, window_data)
+                    if temp_new_cost > best_cost:
+                        new_mapping = vm_pm_mapping.copy()
+                        migration_count = 0
+
+                # 第三优先级：负载均衡
+                if migration_count < max_migrations:
+                    # 计算当前各物理机的负载
+                    active_pms = list(self.data_loader.get_active_physical_machines(new_mapping))
+                    if len(active_pms) > 1:
+                        server_cpu_capacity = float(self.params.get('server_cpu_capacity', 100.0))
+                        server_mem_capacity = float(self.params.get('server_mem_capacity', 100.0))
+
+                        # 计算每台物理机的负载
+                        pm_loads = {}
+                        for pm_id in active_pms:
+                            cpu_load = 0.0
+                            mem_load = 0.0
+                            for vm_id, vm_pm in new_mapping.items():
+                                if vm_pm == pm_id:
+                                    vm_data = window_data.get(vm_id, {})
+                                    cpu_load += float(vm_data.get('cpu_usage', 0.0)) / server_cpu_capacity
+                                    mem_load += float(vm_data.get('memory_usage', 0.0)) / server_mem_capacity
+                            pm_loads[pm_id] = (cpu_load, mem_load)
+
+                        # 找到负载最高和最低的物理机
+                        pm_total_loads = {pm: cpu + mem for pm, (cpu, mem) in pm_loads.items()}
+                        highest_load_pm = max(pm_total_loads.items(), key=lambda x: x[1])[0]
+                        lowest_load_pm = min(pm_total_loads.items(), key=lambda x: x[1])[0]
+
+                        # 如果负载差异显著，尝试平衡
+                        load_diff = pm_total_loads[highest_load_pm] - pm_total_loads[lowest_load_pm]
+                        if load_diff > 0.5:  # 负载差异阈值
+                            # 找到高负载物理机上的正常用户（避免迁移攻击者破坏聚合效果）
+                            high_load_normal_users = [
+                                vm_id for vm_id, vm_pm in new_mapping.items()
+                                if vm_pm == highest_load_pm and not self.vm_is_attacker.get(vm_id, False)
+                            ]
+
+                            # 按负载大小排序，迁移负载较小的虚拟机
+                            if high_load_normal_users:
+                                vm_loads = []
+                                for vm_id in high_load_normal_users:
+                                    vm_data = window_data.get(vm_id, {})
+                                    total_load = (float(vm_data.get('cpu_usage', 0.0)) / server_cpu_capacity +
+                                                  float(vm_data.get('memory_usage', 0.0)) / server_mem_capacity)
+                                    vm_loads.append((vm_id, total_load))
+
+                                # 按负载从小到大排序
+                                vm_loads.sort(key=lambda x: x[1])
+
+                                # 迁移负载较小的虚拟机
+                                for vm_id, _ in vm_loads:
+                                    if migration_count < max_migrations:
+                                        new_mapping[vm_id] = lowest_load_pm
+                                        migration_count += 1
+
             # 计算新映射的成本
             new_cost = self.calculate_cost(new_mapping, vm_pm_mapping, window_data)
-            
+
             # 如果新映射的成本更低，则更新最佳映射
             if new_cost < best_cost:
                 best_mapping = new_mapping.copy()
                 best_cost = new_cost
-        
+
         return best_mapping
     
+    def _check_server_resource_constraints(self, vm_pm_mapping: Dict[int, int], window_data: Dict[int, Dict]) -> bool:
+        """
+        检查服务器资源使用率约束：每台服务器的CPU或内存使用率不能超过40%
+        :param vm_pm_mapping: 虚拟机到物理机的映射
+        :param window_data: 当前时间窗口的数据
+        :return: True表示满足约束，False表示违反约束
+        """
+        active_pms = self.data_loader.get_active_physical_machines(vm_pm_mapping)
+        server_cpu_capacity = float(self.params.get('server_cpu_capacity', 100.0))
+        server_mem_capacity = float(self.params.get('server_mem_capacity', 100.0))
+        
+        for pm_id in active_pms:
+            pm_vms = [vm_id for vm_id, pm in vm_pm_mapping.items() if pm == pm_id]
+            total_cpu_usage = 0.0
+            total_mem_usage = 0.0
+            
+            for vm_id in pm_vms:
+                vm_data = window_data.get(vm_id, {})
+                total_cpu_usage += float(vm_data.get('cpu_usage', 0.0))
+                total_mem_usage += float(vm_data.get('memory_usage', 0.0))
+            
+            # 转换为相对于服务器容量的使用率
+            cpu_usage_ratio = total_cpu_usage / server_cpu_capacity
+            mem_usage_ratio = total_mem_usage / server_mem_capacity
+            
+            if cpu_usage_ratio > 40.0 or mem_usage_ratio > 40.0:
+                return False  # 违反约束条件
+        
+        return True  # 满足所有约束条件
+
     def optimize_vm_placement(self, current_window: int) -> Dict[int, int]:
         """
         优化虚拟机放置
@@ -488,7 +684,7 @@ class MPCController:
             print(f"  - 综合共居风险: {self.last_cost_components['cluster_risk']:.2f} × {self.params['alpha']} = {self.params['alpha'] * self.last_cost_components['cluster_risk']:.2f}")
             print(f"  - 功耗: {self.last_cost_components['power_consumption']:.2f} × {self.params['beta']} = {self.params['beta'] * self.last_cost_components['power_consumption']:.2f}")
             print(f"  - 迁移成本: {self.last_cost_components['migration_cost']:.2f} × {self.params['gamma']} = {self.params['gamma'] * self.last_cost_components['migration_cost']:.2f}")
-            print(f"  - 资源争用: {self.last_cost_components['resource_contention']:.2f} × {self.params['delta']} = {self.params['delta'] * self.last_cost_components['resource_contention']:.2f}")
+            print(f"  - 负载不平衡度: {self.last_cost_components['resource_contention']:.2f} × {self.params['delta']} = {self.params['delta'] * self.last_cost_components['resource_contention']:.2f}")
             print(f"  - 总成本: {current_cost:.2f}")
         else:
             print(f"时间窗口 {current_window} 的当前成本: {current_cost}")
@@ -500,6 +696,10 @@ class MPCController:
         
         for method in methods:
             # 生成新的映射
+            # if method == 'random':
+            #     attempts = 20
+            # elif method == 'heuristic':
+            #     attempts = 1
             new_mapping = self.generate_new_mapping(current_mapping, window_data, method=method, n_attempts=20)
             
             # 计算新的成本

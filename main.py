@@ -668,7 +668,7 @@ def main():
     scheduler.plot_time_series_charts(save_path="mpc_time_series.png")
 
     # 3. 风险对比柱状图（VM风险值、服务器总风险度-不同物理机数量）
-    scheduler.plot_risk_comparison_charts(save_path="mpc_risk_comparison.png")
+    # scheduler.plot_risk_comparison_charts(save_path="mpc_risk_comparison.png")
 
     # 导出结果到CSV
     scheduler.export_results("mpc_results_detailed.csv")
