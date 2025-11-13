@@ -638,10 +638,12 @@ def main():
     """主函数"""
     # 设置虚拟机和物理机数量
     VM_COUNT = 100
-    PM_COUNT = 20
+    PM_COUNT = 10
 
     # 创建并运行MPC调度器
     scheduler = MPCScheduler(vm_count=VM_COUNT, pm_count=PM_COUNT)
+    sandpiper = MPCScheduler(vm_count=VM_COUNT, pm_count=PM_COUNT)
+    metis = MPCScheduler(vm_count=VM_COUNT, pm_count=PM_COUNT)
 
     # 训练模型
     scheduler.ensure_models_trained()
@@ -671,7 +673,7 @@ def main():
     scheduler.plot_risk_comparison_charts(save_path="mpc_risk_comparison.png")
 
     # 导出结果到CSV
-    scheduler.export_results("mpc_results_detailed.csv")
+    scheduler.export_results("mpc_results_detailed_new_829.csv")
 
 
 if __name__ == "__main__":

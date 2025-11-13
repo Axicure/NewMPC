@@ -269,7 +269,8 @@ class PredictionModels:
         for vm_id in self.data_loader.vm_instances.keys():
             cpu_predictions = self.predict_cpu_usage(vm_id, current_window)
             memory_predictions = self.predict_memory_usage(vm_id, current_window)
-            
+            # memory_predictions = [self.data_loader.time_windows[vm_id][current_window]['memory_usage']] * self.prediction_steps
+
             # 获取最近的风险评级
             risk_level = self.data_loader.time_windows[vm_id][current_window]['risk_level']
             
