@@ -21,18 +21,18 @@ class MPCController:
             'beta': 0.3,  # 功耗权重
             'gamma': 0.1,  # 迁移成本权重
             'delta': 0.2,  # 资源争用权重
-            'nu': 1000.0,  # 迁移成本基础参数
-            'mu': 1,  # 迁移成本内存系数
+            'nu': 10.0,  # 迁移成本基础参数
+            'mu': 0.01,  # 迁移成本内存系数
             'w_cpu': 0.4,  # CPU争用权重
             'w_mem': 0.6,  # 内存争用权重
-            'single_server_load': 20000.0,  # 单台服务器功耗参数
+            'single_server_load': 20.0,  # 单台服务器功耗参数
             'max_servers': 20,  # 最大服务器数量，修改为物理机实际数量
-            'max_resource_competition': 50000.0,  # 最大资源争用值，提高限制
+            'max_resource_competition': 5.0,  # 最大资源争用值，提高限制
             'risk_threshold': 0.5,  # 风险评级阈值，超过该值判定为攻击者
-            'risk_window_threshold': 100.0,  # 风险共居时间矩阵阈值
+            'risk_window_threshold': 0.2,  # 风险共居时间矩阵阈值
             'attacker_clear_window': 25,  # 攻击者标记清除时间窗数量
-            'server_cpu_capacity': 6,  # 服务器CPU容量（相对于虚拟机100%的倍数）
-            'server_mem_capacity': 16,  # 服务器内存容量（相对于虚拟机100%的倍数）
+            'server_cpu_capacity': 600,  # 服务器CPU容量（相对于虚拟机1%的倍数）
+            'server_mem_capacity': 1600,  # 服务器内存容量（相对于虚拟机1%的倍数）
             'risk_ref_vm_count': 100,  # 风险归一化的基准VM数量
         }
 
@@ -224,13 +224,13 @@ class MPCController:
             server_risks[pm_id] = self.calculate_server_risk(pm_id, vm_pm_mapping, T_override)
         
         # 计算集群综合共居风险（平方和）
-        cluster_risk_raw = sum(risk ** 2 for risk in server_risks.values())
-
-        # 按VM规模归一：以 risk_ref_vm_count 为基准，将风险缩放到可比量级
-        V = max(1, len(vm_pm_mapping))
-        V0 = max(1, int(self.params.get('risk_ref_vm_count', 100)))
-        scale = (V / V0) ** 2
-        cluster_risk = cluster_risk_raw / max(1.0, scale)
+        cluster_risk = sum(risk for risk in server_risks.values())
+        
+        # 归一化：风险 * M_max / N^2，使得风险受服务器数量和容器数量的影响与其他cost相同
+        M_max = self.params['max_servers']
+        N = self.data_loader.vm_count
+        if N > 0:
+            cluster_risk = cluster_risk * M_max / (N * N)
 
         return cluster_risk
     
@@ -248,6 +248,11 @@ class MPCController:
         
         # 计算功耗
         power_consumption = len(active_pms) * self.params['single_server_load']
+        
+        # 归一化：功耗 / M_max，使得功耗受服务器数量和容器数量的影响与其他cost相同
+        M_max = self.params['max_servers']
+        if M_max > 0:
+            power_consumption = power_consumption / M_max
         
         return power_consumption
     
@@ -267,6 +272,11 @@ class MPCController:
                 mem_usage = window_data.get(vm_id, {}).get('memory_usage', 0)
                 vm_migration_cost = self.params['nu'] + self.params['mu'] * mem_usage
                 migration_cost += vm_migration_cost
+        
+        # 归一化：迁移 / N，使得迁移受服务器数量和容器数量的影响与其他cost相同
+        N = self.data_loader.vm_count
+        if N > 0:
+            migration_cost = migration_cost / N
         
         return migration_cost
     
@@ -341,7 +351,7 @@ class MPCController:
             mem_dev = pm_mem_sum[pm] - mem_avg
             imbalance_sum += w_cpu * (cpu_dev * cpu_dev) + w_mem * (mem_dev * mem_dev)
 
-        load_imbalance = 100 * imbalance_sum / (num_active - 1)
+        load_imbalance = imbalance_sum / (num_active - 1)
         return load_imbalance
     
     def calculate_cost(self, vm_pm_mapping: Dict[int, int], current_mapping: Dict[int, int], window_data: Dict[int, Dict], T_override=None, override_migration_cost: float = None) -> float:
@@ -737,7 +747,7 @@ class MPCController:
             cpu_usage_ratio = total_cpu_usage / server_cpu_capacity
             mem_usage_ratio = total_mem_usage / server_mem_capacity
             
-            if cpu_usage_ratio > 40.0 or mem_usage_ratio > 40.0:
+            if cpu_usage_ratio > 0.4 or mem_usage_ratio > 0.4:
                 return False  # 违反约束条件
         
         return True  # 满足所有约束条件
