@@ -12,7 +12,6 @@ import gc
 from typing import Dict, List, Tuple, Union
 import warnings
 warnings.filterwarnings('ignore')
-
 class PredictionModels:
     def __init__(self, data_loader, models_dir: str = "saved_models"):
         """

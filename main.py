@@ -284,8 +284,12 @@ class MPCScheduler:
                     # 将预测数据与当前时间窗口数据合并
                     for vm_id in current_window_data.keys():
                         future_data[vm_id] = [current_window_data[vm_id]]
-                        if vm_id in predicted_data:
-                            future_data[vm_id].extend(predicted_data[vm_id])
+                        # 若为别名VM，复用其基础VM的预测序列
+                        base_vm_id = vm_id
+                        if hasattr(self.data_loader, 'vm_alias') and vm_id in self.data_loader.vm_alias:
+                            base_vm_id = self.data_loader.vm_alias[vm_id]
+                        if base_vm_id in predicted_data:
+                            future_data[vm_id].extend(predicted_data[base_vm_id])
                 else:
                     # 如果到了结尾，使用实际数据
                     for window_id in range(current_window, min(current_window + prediction_steps + 1, end_window + 1)):
@@ -670,7 +674,7 @@ def main():
     scheduler.plot_time_series_charts(save_path="mpc_time_series.png")
 
     # 3. 风险对比柱状图（VM风险值、服务器总风险度-不同物理机数量）
-    scheduler.plot_risk_comparison_charts(save_path="mpc_risk_comparison.png")
+    # scheduler.plot_risk_comparison_charts(save_path="mpc_risk_comparison.png")
 
     # 导出结果到CSV
     scheduler.export_results("mpc_results_detailed_new_829.csv")
