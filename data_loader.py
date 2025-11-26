@@ -50,7 +50,7 @@ class DataLoader:
     def vm_pm_mapping(self, value: Dict[int, int]):
         self._vm_pm_mapping_raw = dict(value) if value is not None else {}
 
-    def load_vm_pm_mapping(self, file_path: str = "data/container_machine_id_20.csv") -> Dict[int, int]:
+    def load_vm_pm_mapping(self, file_path: str = "data/container_machine_id_10.csv") -> Dict[int, int]:
         """
         加载虚拟机和物理机的映射关系
         :param file_path: 文件路径
@@ -66,7 +66,7 @@ class DataLoader:
         self._vm_pm_mapping_raw = dict(zip(mapping_data['vm_id'], mapping_data['pm_id']))
         return self._vm_pm_mapping_raw
 
-    def load_pm_ids(self, file_path: str = "data/mac_keys/20.csv") -> List[int]:
+    def load_pm_ids(self, file_path: str = "data/mac_keys/10.csv") -> List[int]:
         """
         加载物理机ID列表
         :param file_path: 文件路径
@@ -119,7 +119,7 @@ class DataLoader:
                 if base_vm > 100:
                     base_vm = 100
                 self.vm_alias[vm_id] = base_vm
-        
+
         # 计算各基础VM的窗口数以规划到达时间
         base_vm_window_counts = {}
         for vm_id, df in self.vm_instances.items():
@@ -273,8 +273,10 @@ class DataLoader:
 
         if base_vm_id in self.time_windows:
             for window_id in range(start_window, end_window + 1):
-                if window_id in self.time_windows[base_vm_id] and not self.time_windows[base_vm_id][window_id].get('_inactive', False):
-                    result.append({k: v for k, v in self.time_windows[base_vm_id][window_id].items() if k != '_inactive'})
+                if window_id in self.time_windows[base_vm_id] and not self.time_windows[base_vm_id][window_id].get(
+                        '_inactive', False):
+                    result.append(
+                        {k: v for k, v in self.time_windows[base_vm_id][window_id].items() if k != '_inactive'})
                 else:
                     # 未到达或窗口不存在，使用零值替代
                     result.append({

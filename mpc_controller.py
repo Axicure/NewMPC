@@ -23,16 +23,16 @@ class MPCController:
             'delta': 0.2,  # 资源争用权重
             'nu': 10.0,  # 迁移成本基础参数
             'mu': 0.01,  # 迁移成本内存系数
-            'w_cpu': 0.4,  # CPU争用权重
-            'w_mem': 0.6,  # 内存争用权重
-            'single_server_load': 20.0,  # 单台服务器功耗参数
+            'w_cpu': 10,  # CPU争用权重
+            'w_mem': 15,  # 内存争用权重
+            'single_server_load': 10.0,  # 单台服务器功耗参数
             'max_servers': 20,  # 最大服务器数量，修改为物理机实际数量
             'max_resource_competition': 5.0,  # 最大资源争用值，提高限制
             'risk_threshold': 0.5,  # 风险评级阈值，超过该值判定为攻击者
             'risk_window_threshold': 0.2,  # 风险共居时间矩阵阈值
             'attacker_clear_window': 25,  # 攻击者标记清除时间窗数量
-            'server_cpu_capacity': 600,  # 服务器CPU容量（相对于虚拟机1%的倍数）
-            'server_mem_capacity': 1600,  # 服务器内存容量（相对于虚拟机1%的倍数）
+            'server_cpu_capacity': 300,  # 服务器CPU容量（相对于虚拟机1%的倍数）
+            'server_mem_capacity': 800,  # 服务器内存容量（相对于虚拟机1%的倍数）
             'risk_ref_vm_count': 100,  # 风险归一化的基准VM数量
         }
 
@@ -62,6 +62,47 @@ class MPCController:
 
         # 记录实际执行的迁移
         self.migrations_executed = []
+        self.T_cache = {}
+
+    def _clear_cache(self):
+        """
+        清空T矩阵缓存，在每个时间窗口开始时调用
+        """
+        self.T_cache = {}
+
+    def _simulate_T_matrix(self, vm_pm_mapping: Dict[int, int], steps: int):
+        """
+        模拟T矩阵在未来steps后的状态，并使用缓存。
+        :param vm_pm_mapping: 虚拟机到物理机的映射
+        :param steps: 模拟的步数
+        :return: 模拟后的T矩阵
+        """
+        # 创建一个可哈希的缓存键
+        mapping_tuple = tuple(sorted(vm_pm_mapping.items()))
+        cache_key = (mapping_tuple, steps)
+
+        # 检查缓存
+        if cache_key in self.T_cache:
+            return self.T_cache[cache_key]
+
+        # 如果缓存中没有，则计算
+        T_sim = self.T.copy()
+        if steps > 0:
+            for _ in range(steps):
+                pm_to_vms = {}
+                for vm_id, pm_id in vm_pm_mapping.items():
+                    pm_to_vms.setdefault(pm_id, []).append(vm_id)
+                
+                for vm_list in pm_to_vms.values():
+                    for attacker_vm in vm_list:
+                        if self.vm_is_attacker.get(attacker_vm, False):
+                            for normal_vm in vm_list:
+                                if attacker_vm != normal_vm and not self.vm_is_attacker.get(normal_vm, False):
+                                    T_sim[attacker_vm, normal_vm] += 1
+        
+        # 存入缓存
+        self.T_cache[cache_key] = T_sim
+        return T_sim
 
     def update_attacker_status(self, current_window: int):
         """
@@ -443,18 +484,7 @@ class MPCController:
         eval_window = future_window_data if future_window_data is not None else window_data
         steps = pred_steps if pred_steps is not None else 0
         # 模拟T推进steps步（基于当前映射）
-        T_sim_current = self.T.copy()
-        if steps and steps > 0:
-            for _ in range(int(steps)):
-                pm_to_vms = {}
-                for vm_id, pm_id in vm_pm_mapping.items():
-                    pm_to_vms.setdefault(pm_id, []).append(vm_id)
-                for vm_list in pm_to_vms.values():
-                    for attacker_vm in vm_list:
-                        if self.vm_is_attacker.get(attacker_vm, False):
-                            for normal_vm in vm_list:
-                                if attacker_vm != normal_vm and not self.vm_is_attacker.get(normal_vm, False):
-                                    T_sim_current[attacker_vm, normal_vm] += 1
+        T_sim_current = self._simulate_T_matrix(vm_pm_mapping, int(steps)) if steps and steps > 0 else self.T.copy()
         best_cost = self.calculate_cost(vm_pm_mapping, vm_pm_mapping, eval_window, T_override=T_sim_current)
 
         for _ in range(n_attempts):
@@ -466,7 +496,7 @@ class MPCController:
                 new_mapping = vm_pm_mapping.copy()
 
                 # 随机选择最多为VM总数5%的虚拟机进行迁移（至少为1）
-                max_migration_limit = max(1, int(self.data_loader.vm_count * 0.1))
+                max_migration_limit = max(1, int(self.data_loader.vm_count * 0.05))
                 n_vms_to_migrate = random.randint(1, min(max_migration_limit, len(vm_pm_mapping)))
                 vms_to_migrate = random.sample(list(vm_pm_mapping.keys()), n_vms_to_migrate)
 
@@ -709,18 +739,7 @@ class MPCController:
             # 1) 基于当前窗口数据计算一次迁移成本
             migration_cost_now = self.calculate_migration_cost(vm_pm_mapping, new_mapping, window_data)
             # 2) 模拟T在新映射下前推steps
-            T_sim_new = self.T.copy()
-            if steps and steps > 0:
-                for _ in range(int(steps)):
-                    pm_to_vms = {}
-                    for vm_id, pm_id in new_mapping.items():
-                        pm_to_vms.setdefault(pm_id, []).append(vm_id)
-                    for vm_list in pm_to_vms.values():
-                        for attacker_vm in vm_list:
-                            if self.vm_is_attacker.get(attacker_vm, False):
-                                for normal_vm in vm_list:
-                                    if attacker_vm != normal_vm and not self.vm_is_attacker.get(normal_vm, False):
-                                        T_sim_new[attacker_vm, normal_vm] += 1
+            T_sim_new = self._simulate_T_matrix(new_mapping, int(steps)) if steps and steps > 0 else self.T.copy()
             # 3) 用未来窗口数据与模拟T评估新映射成本（迁移成本覆盖为当前迁移成本）
             new_cost = self.calculate_cost(new_mapping, vm_pm_mapping, eval_window, T_override=T_sim_new,
                                            override_migration_cost=migration_cost_now)
@@ -777,6 +796,9 @@ class MPCController:
         except Exception as _:
             predicted_data = {}
 
+        # 清空缓存
+        self._clear_cache()
+
         # 更新攻击者状态
         self.update_attacker_status(current_window)
 
@@ -799,17 +821,7 @@ class MPCController:
                 eval_window_future[vm_id] = seq[-1]
 
         # 模拟当前映射下 T 在 pred_steps 后的矩阵
-        T_sim_current = self.T.copy()
-        for _ in range(int(pred_steps)):
-            pm_to_vms = {}
-            for vm_id, pm_id in current_mapping.items():
-                pm_to_vms.setdefault(pm_id, []).append(vm_id)
-            for vm_list in pm_to_vms.values():
-                for attacker_vm in vm_list:
-                    if self.vm_is_attacker.get(attacker_vm, False):
-                        for normal_vm in vm_list:
-                            if attacker_vm != normal_vm and not self.vm_is_attacker.get(normal_vm, False):
-                                T_sim_current[attacker_vm, normal_vm] += 1
+        T_sim_current = self._simulate_T_matrix(current_mapping, int(pred_steps))
 
         # “当前cost”定义为：在保持当前映射不变的情况下，使用3步后的预测窗口数据与模拟后的T计算
         current_cost = self.calculate_cost(current_mapping, current_mapping, eval_window_future,
@@ -832,8 +844,6 @@ class MPCController:
 
         # 尝试优化放置
         methods = ['random', 'heuristic']
-        #sandpiper//metis(不放威胁感知)
-        # methods = ['random']
         best_mapping = current_mapping
         best_cost = current_cost
 
@@ -849,17 +859,7 @@ class MPCController:
             # “新方案cost”已在 generate_new_mapping 内部基于未来步数据和模拟T计算，
             # 但这里为了与当前方案同口径，重复计算一次并覆盖迁移成本为当前时刻的迁移成本。
             migration_cost_now = self.calculate_migration_cost(current_mapping, new_mapping, window_data)
-            T_sim_new = self.T.copy()
-            for _ in range(int(pred_steps)):
-                pm_to_vms = {}
-                for vm_id, pm_id in new_mapping.items():
-                    pm_to_vms.setdefault(pm_id, []).append(vm_id)
-                for vm_list in pm_to_vms.values():
-                    for attacker_vm in vm_list:
-                        if self.vm_is_attacker.get(attacker_vm, False):
-                            for normal_vm in vm_list:
-                                if attacker_vm != normal_vm and not self.vm_is_attacker.get(normal_vm, False):
-                                    T_sim_new[attacker_vm, normal_vm] += 1
+            T_sim_new = self._simulate_T_matrix(new_mapping, int(pred_steps))
             new_cost = self.calculate_cost(new_mapping, current_mapping, eval_window_future, T_override=T_sim_new,
                                            override_migration_cost=migration_cost_now)
 
@@ -920,4 +920,4 @@ class MPCController:
         # 清理内存
         gc.collect()
 
-        return self.data_loader.vm_pm_mapping
+        return self.data_loader.vm_pm_mapping 
