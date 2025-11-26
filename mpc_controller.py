@@ -21,18 +21,18 @@ class MPCController:
             'beta': 0.3,  # 功耗权重
             'gamma': 0.1,  # 迁移成本权重
             'delta': 0.2,  # 资源争用权重
-            'nu': 1000.0,  # 迁移成本基础参数
-            'mu': 1,  # 迁移成本内存系数
+            'nu': 10.0,  # 迁移成本基础参数
+            'mu': 0.01,  # 迁移成本内存系数
             'w_cpu': 0.4,  # CPU争用权重
             'w_mem': 0.6,  # 内存争用权重
-            'single_server_load': 20000.0,  # 单台服务器功耗参数
+            'single_server_load': 20.0,  # 单台服务器功耗参数
             'max_servers': 20,  # 最大服务器数量，修改为物理机实际数量
-            'max_resource_competition': 50000.0,  # 最大资源争用值，提高限制
+            'max_resource_competition': 5.0,  # 最大资源争用值，提高限制
             'risk_threshold': 0.5,  # 风险评级阈值，超过该值判定为攻击者
-            'risk_window_threshold': 100.0,  # 风险共居时间矩阵阈值
+            'risk_window_threshold': 0.2,  # 风险共居时间矩阵阈值
             'attacker_clear_window': 25,  # 攻击者标记清除时间窗数量
-            'server_cpu_capacity': 6,  # 服务器CPU容量（相对于虚拟机100%的倍数）
-            'server_mem_capacity': 16,  # 服务器内存容量（相对于虚拟机100%的倍数）
+            'server_cpu_capacity': 600,  # 服务器CPU容量（相对于虚拟机1%的倍数）
+            'server_mem_capacity': 1600,  # 服务器内存容量（相对于虚拟机1%的倍数）
             'risk_ref_vm_count': 100,  # 风险归一化的基准VM数量
         }
 
@@ -156,14 +156,14 @@ class MPCController:
         """
         if vm_pm_mapping is None:
             vm_pm_mapping = self.data_loader.vm_pm_mapping
-        
+
         # 为每个服务器创建虚拟机列表
         pm_to_vms = {}
         for vm_id, pm_id in vm_pm_mapping.items():
             if pm_id not in pm_to_vms:
                 pm_to_vms[pm_id] = []
             pm_to_vms[pm_id].append(vm_id)
-        
+
         # 更新风险共居时间矩阵
         for pm_id, vm_list in pm_to_vms.items():
             for attacker_vm in vm_list:
@@ -172,7 +172,7 @@ class MPCController:
                         if not self.vm_is_attacker.get(normal_vm, False) and attacker_vm != normal_vm:
                             # 增加风险共居时间
                             self.T[attacker_vm, normal_vm] += 1
-    
+
     def reset_risk_time_for_migrated_vms(self, migrated_vms: List[int]):
         """
         重置迁移虚拟机的风险共居时间
@@ -182,7 +182,7 @@ class MPCController:
             # 重置该VM与所有其他VM的风险共居时间
             self.T[vm_id, :] = 0
             self.T[:, vm_id] = 0
-    
+
     def calculate_server_risk(self, pm_id: int, vm_pm_mapping: Dict[int, int] = None, T_override=None) -> float:
         """
         计算服务器的风险度
@@ -192,10 +192,10 @@ class MPCController:
         """
         if vm_pm_mapping is None:
             vm_pm_mapping = self.data_loader.vm_pm_mapping
-        
+
         # 获取服务器上的所有虚拟机
         pm_vms = [vm_id for vm_id, pm in vm_pm_mapping.items() if pm == pm_id]
-        
+
         # 计算服务器风险度
         risk = 0
         T_matrix = self.T if T_override is None else T_override
@@ -203,9 +203,9 @@ class MPCController:
             for vm_b in pm_vms:
                 if vm_a != vm_b:
                     risk += T_matrix[vm_a, vm_b]
-        
+
         return risk
-    
+
     def calculate_cluster_risk(self, vm_pm_mapping: Dict[int, int] = None, T_override=None) -> float:
         """
         计算集群的综合共居风险
@@ -214,26 +214,26 @@ class MPCController:
         """
         if vm_pm_mapping is None:
             vm_pm_mapping = self.data_loader.vm_pm_mapping
-        
+
         # 获取活跃的物理机列表
         active_pms = self.data_loader.get_active_physical_machines(vm_pm_mapping)
-        
+
         # 计算每台服务器的风险度
         server_risks = {}
         for pm_id in active_pms:
             server_risks[pm_id] = self.calculate_server_risk(pm_id, vm_pm_mapping, T_override)
-        
-        # 计算集群综合共居风险（平方和）
-        cluster_risk_raw = sum(risk ** 2 for risk in server_risks.values())
 
-        # 按VM规模归一：以 risk_ref_vm_count 为基准，将风险缩放到可比量级
-        V = max(1, len(vm_pm_mapping))
-        V0 = max(1, int(self.params.get('risk_ref_vm_count', 100)))
-        scale = (V / V0) ** 2
-        cluster_risk = cluster_risk_raw / max(1.0, scale)
+        # 计算集群综合共居风险（平方和）
+        cluster_risk = sum(risk for risk in server_risks.values())
+
+        # 归一化：风险 * M_max / N^2，使得风险受服务器数量和容器数量的影响与其他cost相同
+        M_max = self.params['max_servers']
+        N = self.data_loader.vm_count
+        if N > 0:
+            cluster_risk = cluster_risk * M_max / (N * N)
 
         return cluster_risk
-    
+
     def calculate_power_consumption(self, vm_pm_mapping: Dict[int, int] = None) -> float:
         """
         计算功耗
@@ -242,16 +242,22 @@ class MPCController:
         """
         if vm_pm_mapping is None:
             vm_pm_mapping = self.data_loader.vm_pm_mapping
-        
+
         # 获取活跃的物理机数量
         active_pms = self.data_loader.get_active_physical_machines(vm_pm_mapping)
-        
+
         # 计算功耗
         power_consumption = len(active_pms) * self.params['single_server_load']
-        
+
+        # 归一化：功耗 / M_max，使得功耗受服务器数量和容器数量的影响与其他cost相同
+        M_max = self.params['max_servers']
+        if M_max > 0:
+            power_consumption = power_consumption / M_max
+
         return power_consumption
-    
-    def calculate_migration_cost(self, current_mapping: Dict[int, int], new_mapping: Dict[int, int], window_data: Dict[int, Dict]) -> float:
+
+    def calculate_migration_cost(self, current_mapping: Dict[int, int], new_mapping: Dict[int, int],
+                                 window_data: Dict[int, Dict]) -> float:
         """
         计算迁移成本
         :param current_mapping: 当前虚拟机到物理机的映射
@@ -260,16 +266,21 @@ class MPCController:
         :return: 迁移成本
         """
         migration_cost = 0
-        
+
         for vm_id, new_pm in new_mapping.items():
             if vm_id in current_mapping and current_mapping[vm_id] != new_pm:
                 # 虚拟机需要迁移
                 mem_usage = window_data.get(vm_id, {}).get('memory_usage', 0)
                 vm_migration_cost = self.params['nu'] + self.params['mu'] * mem_usage
                 migration_cost += vm_migration_cost
-        
+
+        # 归一化：迁移 / N，使得迁移受服务器数量和容器数量的影响与其他cost相同
+        N = self.data_loader.vm_count
+        if N > 0:
+            migration_cost = migration_cost / N
+
         return migration_cost
-    
+
     def get_migrated_vms(self, current_mapping: Dict[int, int], new_mapping: Dict[int, int]) -> List[int]:
         """
         获取需要迁移的虚拟机列表
@@ -278,13 +289,13 @@ class MPCController:
         :return: 需要迁移的虚拟机ID列表
         """
         migrated_vms = []
-        
+
         for vm_id, new_pm in new_mapping.items():
             if vm_id in current_mapping and current_mapping[vm_id] != new_pm:
                 migrated_vms.append(vm_id)
-        
+
         return migrated_vms
-    
+
     def calculate_resource_contention(self, vm_pm_mapping: Dict[int, int], window_data: Dict[int, Dict]) -> float:
         """
         计算负载不平衡度
@@ -315,15 +326,15 @@ class MPCController:
             vm_data = window_data.get(vm_id)
             if not vm_data:
                 continue
-            
+
             # 将虚拟机使用率转换为相对于服务器容量的值
             vm_cpu_usage = float(vm_data.get('cpu_usage', 0.0))
             vm_mem_usage = float(vm_data.get('memory_usage', 0.0))
-            
+
             # 转换为相对于服务器容量的值
             cpu_relative = vm_cpu_usage / server_cpu_capacity
             mem_relative = vm_mem_usage / server_mem_capacity
-            
+
             pm_cpu_sum[pm_id] += cpu_relative
             pm_mem_sum[pm_id] += mem_relative
 
@@ -341,10 +352,11 @@ class MPCController:
             mem_dev = pm_mem_sum[pm] - mem_avg
             imbalance_sum += w_cpu * (cpu_dev * cpu_dev) + w_mem * (mem_dev * mem_dev)
 
-        load_imbalance = 100 * imbalance_sum / (num_active - 1)
+        load_imbalance = imbalance_sum / (num_active - 1)
         return load_imbalance
-    
-    def calculate_cost(self, vm_pm_mapping: Dict[int, int], current_mapping: Dict[int, int], window_data: Dict[int, Dict], T_override=None, override_migration_cost: float = None) -> float:
+
+    def calculate_cost(self, vm_pm_mapping: Dict[int, int], current_mapping: Dict[int, int],
+                       window_data: Dict[int, Dict], T_override=None, override_migration_cost: float = None) -> float:
         """
         计算总成本
         :param vm_pm_mapping: 虚拟机到物理机的映射
@@ -355,45 +367,50 @@ class MPCController:
         # 计算各个成本
         cluster_risk = self.calculate_cluster_risk(vm_pm_mapping, T_override)
         power_consumption = self.calculate_power_consumption(vm_pm_mapping)
-        migration_cost = self.calculate_migration_cost(current_mapping, vm_pm_mapping, window_data) if override_migration_cost is None else float(override_migration_cost)
+        migration_cost = self.calculate_migration_cost(current_mapping, vm_pm_mapping,
+                                                       window_data) if override_migration_cost is None else float(
+            override_migration_cost)
         resource_contention = self.calculate_resource_contention(vm_pm_mapping, window_data)
-        
+
         # 检查约束条件
         active_pms = self.data_loader.get_active_physical_machines(vm_pm_mapping)
-        if len(active_pms) > self.params['max_servers']: # or resource_contention > self.params['max_resource_competition']
-            print(f"约束条件违反: 活跃物理机数量={len(active_pms)}/{self.params['max_servers']}, 资源争用={resource_contention:.2f}/{self.params['max_resource_competition']}")
+        if len(active_pms) > self.params[
+            'max_servers']:  # or resource_contention > self.params['max_resource_competition']
+            print(
+                f"约束条件违反: 活跃物理机数量={len(active_pms)}/{self.params['max_servers']}, 资源争用={resource_contention:.2f}/{self.params['max_resource_competition']}")
             return float('inf')  # 违反约束条件，返回无穷大成本
-        
+
         # 检查每台服务器的资源使用率是否超过100%
         server_cpu_capacity = float(self.params.get('server_cpu_capacity', 100.0))
         server_mem_capacity = float(self.params.get('server_mem_capacity', 100.0))
-        
+
         for pm_id in active_pms:
             pm_vms = [vm_id for vm_id, pm in vm_pm_mapping.items() if pm == pm_id]
             total_cpu_usage = 0.0
             total_mem_usage = 0.0
-            
+
             for vm_id in pm_vms:
                 vm_data = window_data.get(vm_id, {})
                 total_cpu_usage += float(vm_data.get('cpu_usage', 0.0))
                 total_mem_usage += float(vm_data.get('memory_usage', 0.0))
-            
+
             # 转换为相对于服务器容量的使用率
             cpu_usage_ratio = total_cpu_usage / server_cpu_capacity
             mem_usage_ratio = total_mem_usage / server_mem_capacity
-            
+
             if cpu_usage_ratio > 100.0 or mem_usage_ratio > 100.0:
-                print(f"约束条件违反: 物理机 {pm_id} 资源超限 - CPU使用率: {cpu_usage_ratio:.2f}%, 内存使用率: {mem_usage_ratio:.2f}%")
+                print(
+                    f"约束条件违反: 物理机 {pm_id} 资源超限 - CPU使用率: {cpu_usage_ratio:.2f}%, 内存使用率: {mem_usage_ratio:.2f}%")
                 return float('inf')  # 违反约束条件，返回无穷大成本
-        
+
         # 计算加权总成本
         total_cost = (
-            self.params['alpha'] * cluster_risk +
-            self.params['beta'] * power_consumption +
-            self.params['gamma'] * migration_cost +
-            self.params['delta'] * resource_contention
+                self.params['alpha'] * cluster_risk +
+                self.params['beta'] * power_consumption +
+                self.params['gamma'] * migration_cost +
+                self.params['delta'] * resource_contention
         )
-        
+
         # 保存各项成本到属性中，便于外部访问
         self.last_cost_components = {
             'cluster_risk': cluster_risk,
@@ -402,11 +419,12 @@ class MPCController:
             'resource_contention': resource_contention,
             'total_cost': total_cost
         }
-        
+
         return total_cost
 
     def generate_new_mapping(self, vm_pm_mapping: Dict[int, int], window_data: Dict[int, Dict], method: str = 'random',
-                             n_attempts: int = 10, future_window_data: Dict[int, Dict] = None, pred_steps: int = None) -> Dict[int, int]:
+                             n_attempts: int = 10, future_window_data: Dict[int, Dict] = None,
+                             pred_steps: int = None) -> Dict[int, int]:
         """
         生成新的虚拟机到物理机的映射
         :param vm_pm_mapping: 当前虚拟机到物理机的映射
@@ -448,7 +466,7 @@ class MPCController:
                 new_mapping = vm_pm_mapping.copy()
 
                 # 随机选择最多为VM总数5%的虚拟机进行迁移（至少为1）
-                max_migration_limit = max(1, int(self.data_loader.vm_count * 0.05))
+                max_migration_limit = max(1, int(self.data_loader.vm_count * 0.1))
                 n_vms_to_migrate = random.randint(1, min(max_migration_limit, len(vm_pm_mapping)))
                 vms_to_migrate = random.sample(list(vm_pm_mapping.keys()), n_vms_to_migrate)
 
@@ -490,7 +508,7 @@ class MPCController:
                         # 按攻击者数量从多到少排序所有物理机，作为潜在目标
                         if len(attacker_pm_distribution) > 1:
                             sorted_pm_by_attacker_count = sorted(attacker_pm_distribution.items(),
-                                                                key=lambda x: len(x[1]), reverse=True)
+                                                                 key=lambda x: len(x[1]), reverse=True)
 
                             # 计算每台物理机上攻击者的共居总时长，优先迁移共居时长最长的
                             pm_cohabitation_times = {}
@@ -548,7 +566,7 @@ class MPCController:
 
                             if not migration_success:
                                 print("攻击者聚合：所有目标物理机都会导致资源争用超限，跳过攻击者聚合步骤")
-                
+
                 if migration_count == max_migrations:
                     temp_new_cost = self.calculate_cost(new_mapping, vm_pm_mapping, window_data)
                     if temp_new_cost > best_cost:
@@ -578,7 +596,8 @@ class MPCController:
 
                         # 目标PM集合：无攻击者的PM，按正常用户数量从多到少排序
                         target_pms_sorted = [pm for pm, _ in sorted(
-                            ((pm, len(pm_normal_users.get(pm, []))) for pm in active_pms if not pm_has_attackers_map.get(pm, False)),
+                            ((pm, len(pm_normal_users.get(pm, []))) for pm in active_pms if
+                             not pm_has_attackers_map.get(pm, False)),
                             key=lambda x: x[1], reverse=True
                         )]
 
@@ -703,7 +722,8 @@ class MPCController:
                                     if attacker_vm != normal_vm and not self.vm_is_attacker.get(normal_vm, False):
                                         T_sim_new[attacker_vm, normal_vm] += 1
             # 3) 用未来窗口数据与模拟T评估新映射成本（迁移成本覆盖为当前迁移成本）
-            new_cost = self.calculate_cost(new_mapping, vm_pm_mapping, eval_window, T_override=T_sim_new, override_migration_cost=migration_cost_now)
+            new_cost = self.calculate_cost(new_mapping, vm_pm_mapping, eval_window, T_override=T_sim_new,
+                                           override_migration_cost=migration_cost_now)
 
             # 如果新映射的成本更低，则更新最佳映射
             if new_cost < best_cost:
@@ -711,7 +731,7 @@ class MPCController:
                 best_cost = new_cost
 
         return best_mapping
-    
+
     def _check_server_resource_constraints(self, vm_pm_mapping: Dict[int, int], window_data: Dict[int, Dict]) -> bool:
         """
         检查服务器资源使用率约束：每台服务器的CPU或内存使用率不能超过40%
@@ -722,24 +742,24 @@ class MPCController:
         active_pms = self.data_loader.get_active_physical_machines(vm_pm_mapping)
         server_cpu_capacity = float(self.params.get('server_cpu_capacity', 100.0))
         server_mem_capacity = float(self.params.get('server_mem_capacity', 100.0))
-        
+
         for pm_id in active_pms:
             pm_vms = [vm_id for vm_id, pm in vm_pm_mapping.items() if pm == pm_id]
             total_cpu_usage = 0.0
             total_mem_usage = 0.0
-            
+
             for vm_id in pm_vms:
                 vm_data = window_data.get(vm_id, {})
                 total_cpu_usage += float(vm_data.get('cpu_usage', 0.0))
                 total_mem_usage += float(vm_data.get('memory_usage', 0.0))
-            
+
             # 转换为相对于服务器容量的使用率
             cpu_usage_ratio = total_cpu_usage / server_cpu_capacity
             mem_usage_ratio = total_mem_usage / server_mem_capacity
-            
-            if cpu_usage_ratio > 40.0 or mem_usage_ratio > 40.0:
+
+            if cpu_usage_ratio > 0.6 or mem_usage_ratio > 0.8:
                 return False  # 违反约束条件
-        
+
         return True  # 满足所有约束条件
 
     def optimize_vm_placement(self, current_window: int) -> Dict[int, int]:
@@ -756,13 +776,13 @@ class MPCController:
             predicted_data = self.prediction_models.predict_future_data(current_window)
         except Exception as _:
             predicted_data = {}
-        
+
         # 更新攻击者状态
         self.update_attacker_status(current_window)
-        
+
         # 当前虚拟机到物理机的映射
         current_mapping = self.data_loader.vm_pm_mapping.copy()
-        
+
         # 计算“当前方案在未来steps后的成本”：
         pred_steps = getattr(self.prediction_models, 'prediction_steps', 3)
         # 合成未来窗口数据：以当前窗口为第0步，再拼接预测步（每VM是列表，取最后一步作为评估数据）
@@ -792,24 +812,31 @@ class MPCController:
                                 T_sim_current[attacker_vm, normal_vm] += 1
 
         # “当前cost”定义为：在保持当前映射不变的情况下，使用3步后的预测窗口数据与模拟后的T计算
-        current_cost = self.calculate_cost(current_mapping, current_mapping, eval_window_future, T_override=T_sim_current)
-        
+        current_cost = self.calculate_cost(current_mapping, current_mapping, eval_window_future,
+                                           T_override=T_sim_current)
+
         # 输出详细的成本信息
         if current_cost != float('inf'):
             print(f"时间窗口 {current_window} 当前成本详情:")
-            print(f"  - 综合共居风险: {self.last_cost_components['cluster_risk']:.2f} × {self.params['alpha']} = {self.params['alpha'] * self.last_cost_components['cluster_risk']:.2f}")
-            print(f"  - 功耗: {self.last_cost_components['power_consumption']:.2f} × {self.params['beta']} = {self.params['beta'] * self.last_cost_components['power_consumption']:.2f}")
-            print(f"  - 迁移成本: {self.last_cost_components['migration_cost']:.2f} × {self.params['gamma']} = {self.params['gamma'] * self.last_cost_components['migration_cost']:.2f}")
-            print(f"  - 负载不平衡度: {self.last_cost_components['resource_contention']:.2f} × {self.params['delta']} = {self.params['delta'] * self.last_cost_components['resource_contention']:.2f}")
+            print(
+                f"  - 综合共居风险: {self.last_cost_components['cluster_risk']:.2f} × {self.params['alpha']} = {self.params['alpha'] * self.last_cost_components['cluster_risk']:.2f}")
+            print(
+                f"  - 功耗: {self.last_cost_components['power_consumption']:.2f} × {self.params['beta']} = {self.params['beta'] * self.last_cost_components['power_consumption']:.2f}")
+            print(
+                f"  - 迁移成本: {self.last_cost_components['migration_cost']:.2f} × {self.params['gamma']} = {self.params['gamma'] * self.last_cost_components['migration_cost']:.2f}")
+            print(
+                f"  - 负载不平衡度: {self.last_cost_components['resource_contention']:.2f} × {self.params['delta']} = {self.params['delta'] * self.last_cost_components['resource_contention']:.2f}")
             print(f"  - 总成本: {current_cost:.2f}")
         else:
             print(f"时间窗口 {current_window} 的当前成本: {current_cost}")
-        
+
         # 尝试优化放置
         methods = ['random', 'heuristic']
+        #sandpiper//metis(不放威胁感知)
+        # methods = ['random']
         best_mapping = current_mapping
         best_cost = current_cost
-        
+
         for method in methods:
             # 生成新的映射
             # if method == 'random':
@@ -817,8 +844,8 @@ class MPCController:
             # elif method == 'heuristic':
             #     attempts = 1
             new_mapping = self.generate_new_mapping(current_mapping, window_data, method=method, n_attempts=20,
-                                                   future_window_data=eval_window_future, pred_steps=pred_steps)
-            
+                                                    future_window_data=eval_window_future, pred_steps=pred_steps)
+
             # “新方案cost”已在 generate_new_mapping 内部基于未来步数据和模拟T计算，
             # 但这里为了与当前方案同口径，重复计算一次并覆盖迁移成本为当前时刻的迁移成本。
             migration_cost_now = self.calculate_migration_cost(current_mapping, new_mapping, window_data)
@@ -833,46 +860,51 @@ class MPCController:
                             for normal_vm in vm_list:
                                 if attacker_vm != normal_vm and not self.vm_is_attacker.get(normal_vm, False):
                                     T_sim_new[attacker_vm, normal_vm] += 1
-            new_cost = self.calculate_cost(new_mapping, current_mapping, eval_window_future, T_override=T_sim_new, override_migration_cost=migration_cost_now)
-            
+            new_cost = self.calculate_cost(new_mapping, current_mapping, eval_window_future, T_override=T_sim_new,
+                                           override_migration_cost=migration_cost_now)
+
             # 如果新的成本更低，更新最佳映射
             if new_cost < best_cost:
                 best_mapping = new_mapping
                 best_cost = new_cost
-        
+
         # 保存优化后的成本，以便外部使用
         self.last_optimization_cost = best_cost
-        
+
         # 如果有更优的映射，应用它
         if best_mapping != current_mapping and best_cost < current_cost:
             # 获取需要迁移的虚拟机
             migrated_vms = self.get_migrated_vms(current_mapping, best_mapping)
-            
+
             if migrated_vms:
                 print(f"时间窗口 {current_window} 执行迁移: {migrated_vms}")
-                
+
                 # 输出详细的迁移信息
                 print("迁移详情:")
                 for vm_id in migrated_vms:
                     source_pm = current_mapping[vm_id]
                     target_pm = best_mapping[vm_id]
                     print(f"  - 虚拟机 {vm_id} 从物理机 {source_pm} 迁移到物理机 {target_pm}")
-                
+
                 print(f"迁移前成本: {current_cost:.2f}, 迁移后成本: {best_cost:.2f}")
-                
+
                 if best_cost != float('inf'):
                     print(f"优化后成本详情:")
-                    print(f"  - 综合共居风险: {self.last_cost_components['cluster_risk']:.2f} × {self.params['alpha']} = {self.params['alpha'] * self.last_cost_components['cluster_risk']:.2f}")
-                    print(f"  - 功耗: {self.last_cost_components['power_consumption']:.2f} × {self.params['beta']} = {self.params['beta'] * self.last_cost_components['power_consumption']:.2f}")
-                    print(f"  - 迁移成本: {self.last_cost_components['migration_cost']:.2f} × {self.params['gamma']} = {self.params['gamma'] * self.last_cost_components['migration_cost']:.2f}")
-                    print(f"  - 资源争用: {self.last_cost_components['resource_contention']:.2f} × {self.params['delta']} = {self.params['delta'] * self.last_cost_components['resource_contention']:.2f}")
-                
+                    print(
+                        f"  - 综合共居风险: {self.last_cost_components['cluster_risk']:.2f} × {self.params['alpha']} = {self.params['alpha'] * self.last_cost_components['cluster_risk']:.2f}")
+                    print(
+                        f"  - 功耗: {self.last_cost_components['power_consumption']:.2f} × {self.params['beta']} = {self.params['beta'] * self.last_cost_components['power_consumption']:.2f}")
+                    print(
+                        f"  - 迁移成本: {self.last_cost_components['migration_cost']:.2f} × {self.params['gamma']} = {self.params['gamma'] * self.last_cost_components['migration_cost']:.2f}")
+                    print(
+                        f"  - 资源争用: {self.last_cost_components['resource_contention']:.2f} × {self.params['delta']} = {self.params['delta'] * self.last_cost_components['resource_contention']:.2f}")
+
                 # 重置迁移虚拟机的风险共居时间
                 self.reset_risk_time_for_migrated_vms(migrated_vms)
-                
+
                 # 更新虚拟机到物理机的映射
                 self.data_loader.vm_pm_mapping = best_mapping
-                
+
                 # 记录实际执行的迁移
                 self.migrations_executed = migrated_vms
             else:
@@ -881,11 +913,11 @@ class MPCController:
         else:
             self.migrations_executed = []
             print(f"时间窗口 {current_window} 无需迁移")
-        
+
         # 更新风险共居时间矩阵
         self.update_risk_cohabitation_time()
-        
+
         # 清理内存
         gc.collect()
-        
-        return self.data_loader.vm_pm_mapping 
+
+        return self.data_loader.vm_pm_mapping

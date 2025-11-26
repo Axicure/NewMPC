@@ -150,7 +150,7 @@ def compute_random_results_with_controller(
     - consolidate_initial: t=0 将 VM 集中到少量 PM（初期 CPU/内存更低）
     - initial_active_pm_ratio / count: 初期活跃 PM 数的比例/数量
     - normalize_by_total_pms: 瞬时 CPU/内存按总 PM 数平均，体现“相对起点”
-    生成列与 mpc_results_detailed.csv 完全一致。
+    生成列与 mpc_results_detailed_20_Services.csv 完全一致。
     """
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
@@ -509,7 +509,7 @@ def main():
         vm_ids=vm_ids,
         pm_ids=pm_ids,
         out_dir=".",
-        csv_name="random_results_detailed.csv",
+        csv_name="random_results_detailed_20_Services.csv",
         consolidate_initial=True,
         initial_active_pm_ratio=0.2,
         initial_active_pm_count=None,
